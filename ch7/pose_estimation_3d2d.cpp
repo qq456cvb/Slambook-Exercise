@@ -11,10 +11,13 @@
 #include <g2o/core/optimization_algorithm_levenberg.h>
 #include <g2o/solvers/csparse/linear_solver_csparse.h>
 #include <g2o/types/sba/types_six_dof_expmap.h>
+#include "sophus/so3.hpp"
+#include "sophus/se3.hpp"
 #include <chrono>
 
 using namespace std;
 using namespace cv;
+typedef Eigen::Matrix<double, 6, 1> Vector6d;
 
 void find_feature_matches (
     const Mat& img_1, const Mat& img_2,
@@ -26,6 +29,13 @@ void find_feature_matches (
 Point2d pixel2cam ( const Point2d& p, const Mat& K );
 
 void bundleAdjustment (
+    const vector<Point3f> points_3d,
+    const vector<Point2f> points_2d,
+    const Mat& K,
+    Mat& R, Mat& t
+);
+
+void myBundleAdjustment (
     const vector<Point3f> points_3d,
     const vector<Point2f> points_2d,
     const Mat& K,
@@ -76,7 +86,7 @@ int main ( int argc, char** argv )
 
     cout<<"calling bundle adjustment"<<endl;
 
-    bundleAdjustment ( pts_3d, pts_2d, K, R, t );
+    ::myBundleAdjustment ( pts_3d, pts_2d, K, R, t );
 }
 
 void find_feature_matches ( const Mat& img_1, const Mat& img_2,
@@ -139,6 +149,162 @@ Point2d pixel2cam ( const Point2d& p, const Mat& K )
            );
 }
 
+
+class VertexCamera : public g2o::BaseVertex<6, Sophus::SE3d>
+{
+    public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    virtual void setToOriginImpl() // 重置
+    {
+        _estimate = Sophus::SE3d();
+    }
+    
+    virtual void oplusImpl( const double* update ) // 更新
+    {
+        Eigen::Map<const Vector6d> update_vec(update);
+        setEstimate(Sophus::SE3d::exp(update_vec) * _estimate);
+    }
+    // 存盘和读盘：留空
+    virtual bool read( istream& in ) {
+        return false;
+    }
+    virtual bool write( ostream& out ) const {
+        return false;
+    }  
+};
+
+class VertexPointXYZ : public g2o::BaseVertex<3, Eigen::Vector3d>
+{
+  public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    virtual bool read( istream& in ) {
+        return false;
+    }
+    virtual bool write( ostream& out ) const {
+        return false;
+    }  
+
+    virtual void setToOriginImpl() {
+      _estimate.fill(0);
+    }
+
+    virtual void oplusImpl(const double* update)
+    {
+      Eigen::Map<const Eigen::Vector3d> v(update);
+      _estimate += v;
+    }
+};
+
+
+class EdgeProject : public g2o::BaseBinaryEdge<2, Eigen::Vector2d, VertexPointXYZ, VertexCamera>{
+  public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    EdgeProject() {
+        _cam = nullptr;
+        resizeParameters(1);
+        installParameter(_cam, 0);
+    }
+
+    virtual bool read( istream& in ) {
+        return false;
+    }
+    virtual bool write( ostream& out ) const {
+        return false;
+    }  
+
+    void computeError()  {
+      const VertexCamera* v1 = static_cast<const VertexCamera*>(_vertices[1]);
+      const VertexPointXYZ* v2 = static_cast<const VertexPointXYZ*>(_vertices[0]);
+      const g2o::CameraParameters * cam
+        = static_cast<const g2o::CameraParameters *>(_cam);
+      _error = _measurement - cam->cam_map(v1->estimate() * (v2->estimate()));
+      
+    }
+
+    g2o::CameraParameters * _cam;
+};
+
+// reference: T=
+//     0.99778  -0.0522171   0.0413239   -0.129224
+//    0.051047    0.998279   0.0288811 -0.00970178
+//  -0.0427608  -0.0267076    0.998728   0.0601133
+//           0           0           0           1
+
+void myBundleAdjustment (
+    const vector< Point3f > points_3d,
+    const vector< Point2f > points_2d,
+    const Mat& K,
+    Mat& R, Mat& t )
+{
+// 初始化g2o
+    typedef g2o::BlockSolver< g2o::BlockSolverTraits<6,3> > Block;  // pose 维度为 6, landmark 维度为 3
+    std::unique_ptr<Block::LinearSolverType> linearSolver = g2o::make_unique<g2o::LinearSolverCSparse<Block::PoseMatrixType>>(); // 线性方程求解器
+    std::unique_ptr<Block> solver_ptr = g2o::make_unique<Block> ( move(linearSolver) );     // 矩阵块求解器
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg ( move(solver_ptr) );
+    g2o::SparseOptimizer optimizer;
+    optimizer.setAlgorithm ( solver );
+
+    // vertex
+    VertexCamera* pose = new VertexCamera(); // camera pose
+    Eigen::Matrix3d R_mat;
+    R_mat <<
+          R.at<double> ( 0,0 ), R.at<double> ( 0,1 ), R.at<double> ( 0,2 ),
+               R.at<double> ( 1,0 ), R.at<double> ( 1,1 ), R.at<double> ( 1,2 ),
+               R.at<double> ( 2,0 ), R.at<double> ( 2,1 ), R.at<double> ( 2,2 );
+    pose->setId ( 0 );
+    pose->setEstimate ( Sophus::SE3d (
+                            R_mat,
+                            Eigen::Vector3d ( t.at<double> ( 0,0 ), t.at<double> ( 1,0 ), t.at<double> ( 2,0 ) )
+                        ) );
+    optimizer.addVertex ( pose );
+
+    int index = 1;
+    for ( const Point3f p:points_3d )   // landmarks
+    {
+        VertexPointXYZ* point = new VertexPointXYZ();
+        point->setId ( index++ );
+        point->setEstimate ( Eigen::Vector3d ( p.x, p.y, p.z ) );
+        point->setMarginalized ( true ); // g2o 中必须设置 marg 参见第十讲内容
+        optimizer.addVertex ( point );
+    }
+
+    // parameter: camera intrinsics
+    g2o::CameraParameters* camera = new g2o::CameraParameters (
+        K.at<double> ( 0,0 ), Eigen::Vector2d ( K.at<double> ( 0,2 ), K.at<double> ( 1,2 ) ), 0
+    );
+    camera->setId ( 0 );
+    optimizer.addParameter ( camera );
+
+    // edges
+    index = 1;
+    for ( const Point2f p:points_2d )
+    {
+        EdgeProject* edge = new EdgeProject();
+        edge->setId ( index );
+        edge->setVertex ( 0, dynamic_cast<VertexPointXYZ*> ( optimizer.vertex ( index ) ) );
+        edge->setVertex ( 1, pose );
+        edge->setMeasurement ( Eigen::Vector2d ( p.x, p.y ) );
+        edge->setParameterId ( 0,0 );
+        edge->setInformation ( Eigen::Matrix2d::Identity() );
+        optimizer.addEdge ( edge );
+        index++;
+    }
+
+    chrono::steady_clock::time_point t1 = chrono::steady_clock::now();
+    optimizer.setVerbose ( true );
+    optimizer.initializeOptimization();
+    optimizer.optimize ( 100 );
+    chrono::steady_clock::time_point t2 = chrono::steady_clock::now();
+    chrono::duration<double> time_used = chrono::duration_cast<chrono::duration<double>> ( t2-t1 );
+    cout<<"optimization costs time: "<<time_used.count() <<" seconds."<<endl;
+
+    cout<<endl<<"after optimization:"<<endl;
+    cout<<"T="<<endl<<pose->estimate().matrix() <<endl;
+
+}
+
+
 void bundleAdjustment (
     const vector< Point3f > points_3d,
     const vector< Point2f > points_2d,
@@ -147,9 +313,9 @@ void bundleAdjustment (
 {
     // 初始化g2o
     typedef g2o::BlockSolver< g2o::BlockSolverTraits<6,3> > Block;  // pose 维度为 6, landmark 维度为 3
-    Block::LinearSolverType* linearSolver = new g2o::LinearSolverCSparse<Block::PoseMatrixType>(); // 线性方程求解器
-    Block* solver_ptr = new Block ( linearSolver );     // 矩阵块求解器
-    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg ( solver_ptr );
+    std::unique_ptr<Block::LinearSolverType> linearSolver = g2o::make_unique<g2o::LinearSolverCSparse<Block::PoseMatrixType>>(); // 线性方程求解器
+    std::unique_ptr<Block> solver_ptr = g2o::make_unique<Block> ( move(linearSolver) );     // 矩阵块求解器
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg ( move(solver_ptr) );
     g2o::SparseOptimizer optimizer;
     optimizer.setAlgorithm ( solver );
 

@@ -12,11 +12,15 @@ find_package( OpenCV 3.1 REQUIRED )
 find_package( G2O REQUIRED )
 find_package( CSparse REQUIRED )
 
+# 为使用 sophus，您需要使用find_package命令找到它
+find_package( Sophus REQUIRED )
+include_directories( ${Sophus_INCLUDE_DIRS} )
+
 include_directories( 
     ${OpenCV_INCLUDE_DIRS} 
     ${G2O_INCLUDE_DIRS}
     ${CSPARSE_INCLUDE_DIR}
-    "/usr/include/eigen3/"
+    "/usr/local/include/eigen3/"
 )
 
 add_executable( feature_extraction feature_extraction.cpp  )
