@@ -37,7 +37,7 @@ void bundleAdjustment (
 
 void myBundleAdjustment (
     const vector<Point3f> points_3d,
-    const vector<Point2f> points_2d,
+    const vector<Point2f> points_2d[],
     const Mat& K,
     Mat& R, Mat& t
 );
@@ -62,7 +62,7 @@ int main ( int argc, char** argv )
     Mat d1 = imread ( argv[3], CV_LOAD_IMAGE_UNCHANGED );       // 深度图为16位无符号数，单通道图像
     Mat K = ( Mat_<double> ( 3,3 ) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1 );
     vector<Point3f> pts_3d;
-    vector<Point2f> pts_2d;
+    vector<Point2f> pts_2d[2];
     for ( DMatch m:matches )
     {
         ushort d = d1.ptr<unsigned short> (int ( keypoints_1[m.queryIdx].pt.y )) [ int ( keypoints_1[m.queryIdx].pt.x ) ];
@@ -71,13 +71,14 @@ int main ( int argc, char** argv )
         float dd = d/5000.0;
         Point2d p1 = pixel2cam ( keypoints_1[m.queryIdx].pt, K );
         pts_3d.push_back ( Point3f ( p1.x*dd, p1.y*dd, dd ) );
-        pts_2d.push_back ( keypoints_2[m.trainIdx].pt );
+        pts_2d[0].push_back ( keypoints_1[m.queryIdx].pt );
+        pts_2d[1].push_back ( keypoints_2[m.trainIdx].pt );
     }
 
     cout<<"3d-2d pairs: "<<pts_3d.size() <<endl;
 
     Mat r, t;
-    solvePnP ( pts_3d, pts_2d, K, Mat(), r, t, false ); // 调用OpenCV 的 PnP 求解，可选择EPNP，DLS等方法
+    solvePnP ( pts_3d, pts_2d[1], K, Mat(), r, t, false ); // 调用OpenCV 的 PnP 求解，可选择EPNP，DLS等方法
     Mat R;
     cv::Rodrigues ( r, R ); // r为旋转向量形式，用Rodrigues公式转换为矩阵
 
@@ -233,7 +234,7 @@ class EdgeProject : public g2o::BaseBinaryEdge<2, Eigen::Vector2d, VertexPointXY
 
 void myBundleAdjustment (
     const vector< Point3f > points_3d,
-    const vector< Point2f > points_2d,
+    const vector< Point2f > points_2d[],
     const Mat& K,
     Mat& R, Mat& t )
 {
@@ -246,20 +247,28 @@ void myBundleAdjustment (
     optimizer.setAlgorithm ( solver );
 
     // vertex
-    VertexCamera* pose = new VertexCamera(); // camera pose
+    VertexCamera* pose[2]; // camera pose
+    pose[0] = new VertexCamera();
+    pose[0]->setId(0);
+    pose[0]->setEstimate(Sophus::SE3d());
+    optimizer.addVertex(pose[0]);
+
     Eigen::Matrix3d R_mat;
     R_mat <<
           R.at<double> ( 0,0 ), R.at<double> ( 0,1 ), R.at<double> ( 0,2 ),
                R.at<double> ( 1,0 ), R.at<double> ( 1,1 ), R.at<double> ( 1,2 ),
                R.at<double> ( 2,0 ), R.at<double> ( 2,1 ), R.at<double> ( 2,2 );
-    pose->setId ( 0 );
-    pose->setEstimate ( Sophus::SE3d (
+    pose[1] = new VertexCamera();
+    pose[1]->setId ( 1 );
+    pose[1]->setEstimate ( Sophus::SE3d (
                             R_mat,
                             Eigen::Vector3d ( t.at<double> ( 0,0 ), t.at<double> ( 1,0 ), t.at<double> ( 2,0 ) )
                         ) );
-    optimizer.addVertex ( pose );
+    optimizer.addVertex ( pose[1] );
 
-    int index = 1;
+
+
+    int index = 2;
     for ( const Point3f p:points_3d )   // landmarks
     {
         VertexPointXYZ* point = new VertexPointXYZ();
@@ -277,18 +286,22 @@ void myBundleAdjustment (
     optimizer.addParameter ( camera );
 
     // edges
-    index = 1;
-    for ( const Point2f p:points_2d )
+    index = 2;
+    assert(points_2d[0].size() == points_2d[1].size());
+    for (size_t i = 0; i < points_2d[0].size(); i++)
     {
-        EdgeProject* edge = new EdgeProject();
-        edge->setId ( index );
-        edge->setVertex ( 0, dynamic_cast<VertexPointXYZ*> ( optimizer.vertex ( index ) ) );
-        edge->setVertex ( 1, pose );
-        edge->setMeasurement ( Eigen::Vector2d ( p.x, p.y ) );
-        edge->setParameterId ( 0,0 );
-        edge->setInformation ( Eigen::Matrix2d::Identity() );
-        optimizer.addEdge ( edge );
-        index++;
+        for (size_t j = 0; j < 2; j++) {
+            EdgeProject* edge = new EdgeProject();
+            edge->setId ( index );
+            // cout << index << endl;
+            edge->setVertex ( 0, dynamic_cast<VertexPointXYZ*> ( optimizer.vertex ( index / 2 + 1 ) ) );
+            edge->setVertex ( 1, pose[j] );
+            edge->setMeasurement ( Eigen::Vector2d ( points_2d[j][i].x, points_2d[j][i].y ) );
+            edge->setParameterId ( 0,0 );
+            edge->setInformation ( Eigen::Matrix2d::Identity() );
+            optimizer.addEdge ( edge );
+            index++;
+        }
     }
 
     chrono::steady_clock::time_point t1 = chrono::steady_clock::now();
@@ -300,8 +313,9 @@ void myBundleAdjustment (
     cout<<"optimization costs time: "<<time_used.count() <<" seconds."<<endl;
 
     cout<<endl<<"after optimization:"<<endl;
-    cout<<"T="<<endl<<pose->estimate().matrix() <<endl;
-
+    cout<<"T1="<<endl<<pose[0]->estimate().matrix() <<endl;
+    cout<<"T2="<<endl<<pose[1]->estimate().matrix() <<endl;
+    cout<<"relative T="<<endl<<(pose[0]->estimate().inverse() * pose[1]->estimate()).matrix() <<endl;
 }
 
 
