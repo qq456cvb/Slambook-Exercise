@@ -1,3 +1,7 @@
+> **Note:** This is my personal study/exercise copy of Gao Xiang's *slambook* ("14 Lectures on Visual SLAM"), used while working through the book — some chapters contain my own exercise solutions (e.g. the chapter 7 bundle-adjustment exercise). The original upstream repository is [gaoxiang12/slambook](https://github.com/gaoxiang12/slambook), and the original book README is preserved below.
+
+---
+
 # slambook
 This is the code written for my new book about visual SLAM called "14 lectures on visual SLAM" which was released in April 2017. It is highy recommended to download the code and run it in you own machine so that you can learn more efficiently and also modify it. The code is stored by chapters like "ch2" and "ch4". Note that chapter 9 is a project so I stored it in the "project" directory.
 
